@@ -1,0 +1,13 @@
+langchain
+langchain-core
+langchain-community
+langchain-text-splitters
+langgraph
+
+langchain-google-genai
+langchain-groq
+
+python-dotenv
+
+pydantic
+typing-extensions
