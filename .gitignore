@@ -1,2 +1,4 @@
 .env
 myvenv/
+faiss_tool_index/
+app.log
