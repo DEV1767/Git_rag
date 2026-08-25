@@ -1,2 +1,3 @@
 .env
 myvenv/
+app.log
