@@ -1,4 +1,5 @@
 import asyncio
+
 from mcp_setup import (
     mcp_session,
     search_with_mcp,
@@ -12,20 +13,32 @@ from retriver import (
 )
 
 from llm import Groq_model
-from repo_helper import parse_github_repo
-from repo_helper import extract_repository
-from prompt_helper import retriever_prompt
+
+from repo_helper import (
+    parse_github_repo,
+    extract_repository,
+)
+
+from prompt_helper import (
+    agent_prompt,
+    retriever_prompt,
+    issue_prompt,
+)
+
+from tools.github_helper import create_issue_tools
 
 
 async def generate_answer(
     question,
     context,
 ):
-    
-    prompt=retriever_prompt.invoke({
-        "question":question,
-        "context":context
-    })
+    prompt = retriever_prompt.invoke(
+        {
+            "question": question,
+            "context": context,
+        }
+    )
+
     response = await Groq_model.ainvoke(prompt)
 
     content = response.content
@@ -38,21 +51,42 @@ async def generate_answer(
 
 async def main():
 
-    print("\n=================================")
-    print("       GitHub RAG Agent")
-    print("=================================")
-
     user_input = input("\nEnter GitHub repository " "(owner/repo or URL): ")
 
     owner, repo = parse_github_repo(user_input)
 
-    print("\nRequested repository:")
-    print(f"Owner : {owner}")
-    print(f"Repo  : {repo}")
+    # ==========================================================
+    # ONE MCP SESSION
+    # ==========================================================
 
     async with mcp_session() as session:
 
         print("\nMCP connected.")
+
+        # ======================================================
+        # CREATE ISSUE TOOLS USING SAME MCP SESSION
+        # ======================================================
+
+        issue_tools = create_issue_tools(session)
+
+        search_issue = issue_tools["search_repo_issue"]
+
+        get_issue = issue_tools["get_the_repo_issue"]
+
+        # ======================================================
+        # BIND ISSUE TOOLS TO LLM
+        # ======================================================
+
+        llm_with_tools = Groq_model.bind_tools(
+            [
+                search_issue,
+                get_issue,
+            ]
+        )
+
+        # ======================================================
+        # FIND REPOSITORY
+        # ======================================================
 
         query = f"Find the GitHub repository " f"{owner}/{repo}"
 
@@ -69,7 +103,9 @@ async def main():
         print(tool_name)
 
         if tool_name != "search_repositories":
+
             print("\nThe agent did not select " "search_repositories.")
+
             return
 
         repository = extract_repository(
@@ -79,18 +115,24 @@ async def main():
         )
 
         if repository is None:
+
             print("\nRepository not found.")
+
             return
 
         print("\n=================================")
         print("Repository found")
         print("=================================")
 
-        print(f"Name       : " f"{repository.get('full_name')}")
+        print(f"Name        : " f"{repository.get('full_name')}")
 
-        print(f"Description: " f"{repository.get('description')}")
+        print(f"Description : " f"{repository.get('description')}")
 
-        print(f"URL        : " f"{repository.get('html_url')}")
+        print(f"URL         : " f"{repository.get('html_url')}")
+
+        # ======================================================
+        # BUILD REPOSITORY RAG
+        # ======================================================
 
         print("\nBuilding repository RAG...")
 
@@ -101,6 +143,10 @@ async def main():
         )
 
         print("\nRepository RAG created successfully.")
+
+        # ======================================================
+        # QUESTION LOOP
+        # ======================================================
 
         while True:
 
@@ -113,6 +159,106 @@ async def main():
             }:
                 break
 
+            # ==================================================
+            # AGENT / TOOL ROUTER
+            # ==================================================
+
+            routing_prompt = agent_prompt.invoke(
+                {
+                    "question": question,
+                }
+            )
+
+            response = await llm_with_tools.ainvoke(routing_prompt)
+
+            # ==================================================
+            # ISSUE TOOL SELECTED
+            # ==================================================
+
+            if response.tool_calls:
+
+                tool_messages = []
+
+                for tool_call in response.tool_calls:
+
+                    tool_name = tool_call["name"]
+
+                    tool_args = dict(tool_call["args"])
+
+                    # ------------------------------------------
+                    # Repository is already known
+                    # ------------------------------------------
+
+                    tool_args["owner"] = owner
+                    tool_args["repo"] = repo
+
+                    # ------------------------------------------
+                    # Search issues
+                    # ------------------------------------------
+
+                    if tool_name == "search_repo_issue":
+
+                        tool_result = await search_issue.ainvoke(tool_args)
+
+                    # ------------------------------------------
+                    # Get specific issue
+                    # ------------------------------------------
+
+                    elif tool_name == "get_the_repo_issue":
+
+                        tool_result = await get_issue.ainvoke(tool_args)
+
+                    else:
+
+                        continue
+
+                    tool_messages.append(
+                        {
+                            "role": "tool",
+                            "content": str(tool_result),
+                            "tool_call_id": (tool_call["id"]),
+                        }
+                    )
+
+                # ==================================================
+                # BUILD ISSUE CONTEXT
+                # ==================================================
+
+                issue_context = "\n\n".join(
+                    message["content"] for message in tool_messages
+                )
+
+                # ==================================================
+                # FINAL ISSUE ANSWER
+                # ==================================================
+
+                issue_answer_prompt = issue_prompt.invoke(
+                    {
+                        "question": question,
+                        "issue_context": issue_context,
+                    }
+                )
+
+                final_response = await Groq_model.ainvoke(issue_answer_prompt)
+
+                content = final_response.content
+
+                if isinstance(content, list):
+
+                    content = "".join(str(x) for x in content)
+
+                print("\n=================================")
+                print("Final Answer")
+                print("=================================")
+
+                print(content)
+
+                continue
+
+            # ==================================================
+            # NORMAL REPOSITORY RAG
+            # ==================================================
+
             documents = retrieve_documents(
                 repo_store,
                 question,
@@ -120,7 +266,9 @@ async def main():
             )
 
             if not documents:
+
                 print("\nNo relevant repository " "content found.")
+
                 continue
 
             context = build_context(documents)
@@ -135,6 +283,7 @@ async def main():
             print("\n=================================")
             print("Final Answer")
             print("=================================")
+
             print(answer)
 
 

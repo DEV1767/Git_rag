@@ -1,9 +1,26 @@
-from embedding_model import embedding_model
+import asyncio
+from mcp_setup import mcp_session
 
-text = "This is a GitHub repository."
 
-vector = embedding_model.embed_query(text)
+async def main():
 
-print("Embedding created successfully")
-print("Dimensions:", len(vector))
-print("First 5 values:", vector[:5])
+    async with mcp_session() as session:
+
+        result = await session.list_tools()
+
+        for tool in result.tools:
+
+            if tool.name == "issue_read":
+
+                print("\nTOOL:")
+                print(tool.name)
+
+                print("\nDESCRIPTION:")
+                print(tool.description)
+
+                print("\nINPUT SCHEMA:")
+                print(tool.inputSchema)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
