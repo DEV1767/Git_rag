@@ -1,7 +1,5 @@
 import asyncio
 import json
-import re
-
 from mcp_setup import (
     mcp_session,
     search_with_mcp,
@@ -9,100 +7,64 @@ from mcp_setup import (
 
 from repo_search import build_repo_store
 
+from retriver import (
+    retrieve_documents,
+    build_context,
+)
 
-def parse_github_repo(user_input):
-
-    user_input = user_input.strip()
-
-    pattern = r"https?://github\.com/" r"([^/\s]+)/" r"([^/\s?#]+)"
-
-    match = re.search(
-        pattern,
-        user_input,
-    )
-
-    if match:
-
-        return (
-            match.group(1),
-            match.group(2).replace(
-                ".git",
-                "",
-            ),
-        )
-
-    if "/" in user_input:
-
-        parts = user_input.split(
-            "/",
-            1,
-        )
-
-        owner = parts[0].strip()
-        repo = parts[1].strip()
-
-        if owner and repo:
-
-            return owner, repo
-
-    raise ValueError("Use GitHub URL or owner/repo")
+from llm import Groq_model
+from repo_helper import parse_github_repo
+from repo_helper import extract_repository
 
 
-def extract_repository(
-    result_text,
-    owner,
-    repo,
+async def generate_answer(
+    question,
+    context,
 ):
+    prompt = f"""
+You are a GitHub repository assistant.
 
-    try:
+Answer the user's question using only the repository context provided below.
 
-        data = json.loads(result_text)
+USER QUESTION:
+{question}
 
-    except json.JSONDecodeError:
+REPOSITORY CONTEXT:
+{context}
 
-        print("\nCould not parse MCP result.")
+Rules:
+- Answer only from the repository context.
+- Do not invent information.
+- If the answer cannot be found in the context, say:
+"I could not find the answer in the repository."
+- Mention the relevant file names when useful.
+- Explain the code clearly and concisely.
 
-        print(result_text)
+ANSWER:
+"""
 
-        return None
+    response = await Groq_model.ainvoke(prompt)
 
-    items = data.get(
-        "items",
-        [],
-    )
+    content = response.content
 
-    wanted = (f"{owner}/{repo}").lower()
+    if isinstance(content, list):
+        content = "".join(str(x) for x in content)
 
-    for item in items:
-
-        full_name = item.get(
-            "full_name",
-            "",
-        ).lower()
-
-        if full_name == wanted:
-
-            return item
-
-    return None
+    return content
 
 
 async def main():
 
     print("\n=================================")
-
     print("       GitHub RAG Agent")
-
     print("=================================")
 
     user_input = input("\nEnter GitHub repository " "(owner/repo or URL): ")
 
     owner, repo = parse_github_repo(user_input)
 
-    print(f"\nRequested repository:")
-
+    print("\nRequested repository:")
     print(f"Owner : {owner}")
-
     print(f"Repo  : {repo}")
 
     async with mcp_session() as session:
@@ -121,13 +83,10 @@ async def main():
         )
 
         print("\nSelected MCP tool:")
-
         print(tool_name)
 
         if tool_name != "search_repositories":
-
             print("\nThe agent did not select " "search_repositories.")
-
             return
 
         repository = extract_repository(
@@ -137,15 +96,11 @@ async def main():
         )
 
         if repository is None:
-
             print("\nRepository not found.")
-
             return
 
         print("\n=================================")
-
         print("Repository found")
-
         print("=================================")
 
         print(f"Name       : " f"{repository.get('full_name')}")
@@ -164,30 +119,41 @@ async def main():
 
         print("\nRepository RAG created successfully.")
 
-        question = input("\nWhat do you want to know " "about this repository? ")
+        while True:
 
-        documents = repo_store.similarity_search(
-            question,
-            k=5,
-        )
+            question = input("\nWhat do you want to know " "about this repository? ")
 
-        print("\nRelevant repository files:")
+            if question.lower() in {
+                "exit",
+                "quit",
+                "q",
+            }:
+                break
 
-        for doc in documents:
-
-            print(
-                "-",
-                doc.metadata.get(
-                    "path",
-                    "unknown",
-                ),
+            documents = retrieve_documents(
+                repo_store,
+                question,
+                k=5,
             )
 
-        print("\nRepository chunks retrieved:")
+            if not documents:
+                print("\nNo relevant repository " "content found.")
+                continue
 
-        print(len(documents))
+            context = build_context(documents)
+
+            print("\nGenerating answer...")
+
+            answer = await generate_answer(
+                question,
+                context,
+            )
+
+            print("\n=================================")
+            print("Final Answer")
+            print("=================================")
+            print(answer)
 
 
 if __name__ == "__main__":
-
     asyncio.run(main())
