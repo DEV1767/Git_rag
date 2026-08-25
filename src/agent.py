@@ -1,5 +1,4 @@
 import asyncio
-import json
 from mcp_setup import (
     mcp_session,
     search_with_mcp,
@@ -15,34 +14,18 @@ from retriver import (
 from llm import Groq_model
 from repo_helper import parse_github_repo
 from repo_helper import extract_repository
+from prompt_helper import retriever_prompt
 
 
 async def generate_answer(
     question,
     context,
 ):
-    prompt = f"""
-You are a GitHub repository assistant.
-
-Answer the user's question using only the repository context provided below.
-
-USER QUESTION:
-{question}
-
-REPOSITORY CONTEXT:
-{context}
-
-Rules:
-- Answer only from the repository context.
-- Do not invent information.
-- If the answer cannot be found in the context, say:
-"I could not find the answer in the repository."
-- Mention the relevant file names when useful.
-- Explain the code clearly and concisely.
-
-ANSWER:
-"""
-
+    
+    prompt=retriever_prompt.invoke({
+        "question":question,
+        "context":context
+    })
     response = await Groq_model.ainvoke(prompt)
 
     content = response.content
