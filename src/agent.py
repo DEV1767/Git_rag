@@ -1,16 +1,9 @@
 import asyncio
 
-from mcp_setup import (
-    mcp_session,
-    search_with_mcp,
-)
+from mcp_setup import mcp_session, execute_mcp_tool
 
 from repo_search import build_repo_store
 
-from retriver import (
-    retrieve_documents,
-    build_context,
-)
 
 from llm import Groq_model
 
@@ -19,13 +12,11 @@ from repo_helper import (
     extract_repository,
 )
 
-from prompt_helper import (
-    agent_prompt,
-    retriever_prompt,
-    issue_prompt,
-)
+from qdrant_setup import build_tool_store
 
-from tools.github_helper import create_issue_tools
+from prompt_helper import retriever_prompt, tool_selection_prompt
+
+from tools.tool_selector import select_tool
 
 
 async def generate_answer(
@@ -51,240 +42,45 @@ async def generate_answer(
 
 async def main():
 
-    user_input = input("\nEnter GitHub repository " "(owner/repo or URL): ")
+    repository_url = input("Enter the repository url : \n")
 
-    owner, repo = parse_github_repo(user_input)
+    owner, repo = parse_github_repo(repository_url)
 
-    # ==========================================================
-    # ONE MCP SESSION
-    # ==========================================================
+    tool_store = build_tool_store()
 
     async with mcp_session() as session:
 
-        print("\nMCP connected.")
-
-        # ======================================================
-        # CREATE ISSUE TOOLS USING SAME MCP SESSION
-        # ======================================================
-
-        issue_tools = create_issue_tools(session)
-
-        search_issue = issue_tools["search_repo_issue"]
-
-        get_issue = issue_tools["get_the_repo_issue"]
-
-        # ======================================================
-        # BIND ISSUE TOOLS TO LLM
-        # ======================================================
-
-        llm_with_tools = Groq_model.bind_tools(
-            [
-                search_issue,
-                get_issue,
-            ]
-        )
-
-        # ======================================================
-        # FIND REPOSITORY
-        # ======================================================
-
-        query = f"Find the GitHub repository " f"{owner}/{repo}"
-
-        (
-            tool_name,
-            arguments,
-            result_text,
-        ) = await search_with_mcp(
-            session,
-            query,
-        )
-
-        print("\nSelected MCP tool:")
-        print(tool_name)
-
-        if tool_name != "search_repositories":
-
-            print("\nThe agent did not select " "search_repositories.")
-
-            return
-
-        repository = extract_repository(
-            result_text,
-            owner,
-            repo,
-        )
-
-        if repository is None:
-
-            print("\nRepository not found.")
-
-            return
-
-        print("\n=================================")
-        print("Repository found")
-        print("=================================")
-
-        print(f"Name        : " f"{repository.get('full_name')}")
-
-        print(f"Description : " f"{repository.get('description')}")
-
-        print(f"URL         : " f"{repository.get('html_url')}")
-
-        # ======================================================
-        # BUILD REPOSITORY RAG
-        # ======================================================
-
-        print("\nBuilding repository RAG...")
-
-        repo_store = await build_repo_store(
-            session,
-            owner,
-            repo,
-        )
-
-        print("\nRepository RAG created successfully.")
-
-        # ======================================================
-        # QUESTION LOOP
-        # ======================================================
-
         while True:
 
-            question = input("\nWhat do you want to know " "about this repository? ")
+            question = input("\nEnter your Query (or type 'exit'):\n")
 
-            if question.lower() in {
-                "exit",
-                "quit",
-                "q",
-            }:
+            if question.lower() == "exit":
                 break
 
-            # ==================================================
-            # AGENT / TOOL ROUTER
-            # ==================================================
-
-            routing_prompt = agent_prompt.invoke(
-                {
-                    "question": question,
-                }
-            )
-
-            response = await llm_with_tools.ainvoke(routing_prompt)
-
-            # ==================================================
-            # ISSUE TOOL SELECTED
-            # ==================================================
-
-            if response.tool_calls:
-
-                tool_messages = []
-
-                for tool_call in response.tool_calls:
-
-                    tool_name = tool_call["name"]
-
-                    tool_args = dict(tool_call["args"])
-
-                    # ------------------------------------------
-                    # Repository is already known
-                    # ------------------------------------------
-
-                    tool_args["owner"] = owner
-                    tool_args["repo"] = repo
-
-                    # ------------------------------------------
-                    # Search issues
-                    # ------------------------------------------
-
-                    if tool_name == "search_repo_issue":
-
-                        tool_result = await search_issue.ainvoke(tool_args)
-
-                    # ------------------------------------------
-                    # Get specific issue
-                    # ------------------------------------------
-
-                    elif tool_name == "get_the_repo_issue":
-
-                        tool_result = await get_issue.ainvoke(tool_args)
-
-                    else:
-
-                        continue
-
-                    tool_messages.append(
-                        {
-                            "role": "tool",
-                            "content": str(tool_result),
-                            "tool_call_id": (tool_call["id"]),
-                        }
-                    )
-
-                # ==================================================
-                # BUILD ISSUE CONTEXT
-                # ==================================================
-
-                issue_context = "\n\n".join(
-                    message["content"] for message in tool_messages
-                )
-
-                # ==================================================
-                # FINAL ISSUE ANSWER
-                # ==================================================
-
-                issue_answer_prompt = issue_prompt.invoke(
-                    {
-                        "question": question,
-                        "issue_context": issue_context,
-                    }
-                )
-
-                final_response = await Groq_model.ainvoke(issue_answer_prompt)
-
-                content = final_response.content
-
-                if isinstance(content, list):
-
-                    content = "".join(str(x) for x in content)
-
-                print("\n=================================")
-                print("Final Answer")
-                print("=================================")
-
-                print(content)
-
-                continue
-
-            # ==================================================
-            # NORMAL REPOSITORY RAG
-            # ==================================================
-
-            documents = retrieve_documents(
-                repo_store,
+            tool = await select_tool(
                 question,
-                k=5,
+                session,
+                tool_store,
             )
 
-            if not documents:
+            selected_tool = tool["selection"]
 
-                print("\nNo relevant repository " "content found.")
+            print("\nSelected tool:")
+            print(selected_tool)
 
-                continue
+            arguments = {
+                "owner": owner,
+                "repo": repo,
+            }
 
-            context = build_context(documents)
-
-            print("\nGenerating answer...")
-
-            answer = await generate_answer(
-                question,
-                context,
+            result = await execute_mcp_tool(
+                session,
+                selected_tool,
+                arguments,
             )
 
-            print("\n=================================")
-            print("Final Answer")
-            print("=================================")
-
-            print(answer)
+            print("\nMCP Result:")
+            print(result)
 
 
 if __name__ == "__main__":
