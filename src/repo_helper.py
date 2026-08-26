@@ -38,32 +38,3 @@ def parse_github_repo(user_input):
     )
     
     
-def extract_repository(
-    result_text,
-    owner,
-    repo,
-):
-    try:
-        data = json.loads(result_text)
-    except json.JSONDecodeError:
-        print("\nCould not parse MCP result.")
-        print(result_text)
-        return None
-
-    items = data.get(
-        "items",
-        [],
-    )
-
-    wanted = f"{owner}/{repo}".lower()
-
-    for item in items:
-        full_name = item.get(
-            "full_name",
-            "",
-        ).lower()
-
-        if full_name == wanted:
-            return item
-
-    return None

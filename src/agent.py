@@ -1,20 +1,26 @@
 import asyncio
 
-from mcp_setup import mcp_session, execute_mcp_tool
+from mcp_setup import (
+    mcp_session,
+    execute_mcp_tool,
+)
 
 from repo_search import build_repo_store
 
+from retriver import (
+    retrieve_documents,
+    build_context,
+)
 
 from llm import Groq_model
 
 from repo_helper import (
     parse_github_repo,
-    extract_repository,
 )
 
 from qdrant_setup import build_tool_store
 
-from prompt_helper import retriever_prompt, tool_selection_prompt
+from prompt_helper import retriever_prompt
 
 from tools.tool_selector import select_tool
 
@@ -50,11 +56,19 @@ async def main():
 
     async with mcp_session() as session:
 
+        print("\nBuilding repository RAG store...")
+
+        repo_store = await build_repo_store(
+            session,
+            owner,
+            repo,
+        )
+
         while True:
 
             question = input("\nEnter your Query (or type 'exit'):\n")
 
-            if question.lower() == "exit":
+            if question.lower().strip() == "exit":
                 break
 
             tool = await select_tool(
@@ -73,14 +87,43 @@ async def main():
                 "repo": repo,
             }
 
-            result = await execute_mcp_tool(
+            mcp_result = await execute_mcp_tool(
                 session,
                 selected_tool,
                 arguments,
             )
 
             print("\nMCP Result:")
-            print(result)
+            print(mcp_result)
+
+            documents = retrieve_documents(
+                repo_store,
+                question,
+            )
+
+            print(f"\nRetrieved {len(documents)} " "repository documents.")
+
+            repo_context = build_context(documents)
+
+            mcp_context = str(mcp_result)
+
+            context = f"""
+Repository Code Context:
+
+{repo_context}
+
+GitHub MCP Context:
+
+{mcp_context}
+"""
+
+            answer = await generate_answer(
+                question,
+                context,
+            )
+
+            print("\nFinal Answer:")
+            print(answer)
 
 
 if __name__ == "__main__":

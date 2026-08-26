@@ -3,12 +3,11 @@ import os
 
 from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
-from qdrant_setup import client
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 from qdrant_client.models import Distance, VectorParams
-from embedding_model import embedding_model
 
+from qdrant_setup import client
+from embedding_model import embedding_model
 
 IGNORED_DIRECTORIES = {
     ".git",
@@ -59,7 +58,6 @@ ALLOWED_EXTENSIONS = {
 
 
 def should_include_file(path: str) -> bool:
-
     filename = os.path.basename(path)
 
     if filename in IGNORED_FILES:
@@ -88,18 +86,15 @@ def should_include_file(path: str) -> bool:
 
 
 def extract_file_content(tool_result):
-
     for content in tool_result.content:
 
         if hasattr(content, "resource"):
-
             resource = content.resource
 
             if hasattr(resource, "text") and resource.text:
                 return resource.text
 
         if hasattr(content, "text") and content.text:
-
             text = content.text
 
             try:
@@ -119,7 +114,6 @@ def extract_file_content(tool_result):
 
 
 def extract_directory_result(tool_result):
-
     output = []
 
     for content in tool_result.content:
@@ -129,14 +123,19 @@ def extract_directory_result(tool_result):
             try:
                 data = json.loads(content.text)
                 return data
+
             except json.JSONDecodeError:
                 continue
 
     return output
 
 
-async def get_file_contents(session, owner, repo, path=""):
-
+async def get_file_contents(
+    session,
+    owner,
+    repo,
+    path="",
+):
     return await session.call_tool(
         "get_file_contents",
         {
@@ -153,7 +152,6 @@ async def fetch_file(
     repo,
     path,
 ):
-
     print(f"Reading: {path}")
 
     result = await get_file_contents(
@@ -166,9 +164,7 @@ async def fetch_file(
     file_content = extract_file_content(result)
 
     if not file_content:
-
         print(f"Could not extract content: {path}")
-
         return []
 
     document = Document(
@@ -177,15 +173,19 @@ async def fetch_file(
             "owner": owner,
             "repo": repo,
             "path": path,
-            "source": f"github:{owner}/{repo}/{path}",
+            "source": (f"github:{owner}/{repo}/{path}"),
         },
     )
 
     return [document]
 
 
-async def fetch_repository(session, owner, repo, path=""):
-
+async def fetch_repository(
+    session,
+    owner,
+    repo,
+    path="",
+):
     print(f"Fetching: {path or '/'}")
 
     result = await get_file_contents(
@@ -256,7 +256,6 @@ async def fetch_repository(session, owner, repo, path=""):
 
 
 def split_documents(documents):
-
     print(f"\nFiles loaded: {len(documents)}")
 
     splitter = RecursiveCharacterTextSplitter(
@@ -278,13 +277,13 @@ def create_repo_store(
 ):
     collection_name = f"github_{owner}_{repo}".replace("/", "_")
 
-    print(f"\nCreating Qdrant collection: " f"{collection_name}")
-    test_embedding = embedding_model.embed_query("test")
-
-    vector_size = len(test_embedding)
-
+    print(f"\nQdrant collection: " f"{collection_name}")
 
     if not client.collection_exists(collection_name):
+        test_embedding = embedding_model.embed_query("test")
+
+        vector_size = len(test_embedding)
+
         client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
@@ -295,19 +294,26 @@ def create_repo_store(
 
         print("Qdrant collection created.")
 
+        vectorstore = QdrantVectorStore(
+            client=client,
+            collection_name=collection_name,
+            embedding=embedding_model,
+        )
+
+        vectorstore.add_documents(chunks)
+
+        print(f"Added {len(chunks)} chunks to Qdrant.")
+
     else:
         print("Qdrant collection already exists.")
 
- 
-    vectorstore = QdrantVectorStore(
-        client=client,
-        collection_name=collection_name,
-        embedding=embedding_model,
-    )
+        vectorstore = QdrantVectorStore(
+            client=client,
+            collection_name=collection_name,
+            embedding=embedding_model,
+        )
 
-    vectorstore.add_documents(chunks)
-
-    print("Repository vector store created.")
+        print("Using existing repository vector store.")
 
     return vectorstore
 
@@ -317,6 +323,14 @@ async def build_repo_store(
     owner,
     repo,
 ):
+    collection_name = f"github_{owner}_{repo}".replace("/", "_")
+
+    if client.collection_exists(collection_name):
+        return create_repo_store(
+            [],
+            owner,
+            repo,
+        )
 
     documents = await fetch_repository(
         session,
@@ -325,7 +339,6 @@ async def build_repo_store(
     )
 
     if not documents:
-
         raise ValueError("No repository files were found.")
 
     chunks = split_documents(documents)
@@ -340,4 +353,4 @@ async def build_repo_store(
 
 
 if __name__ == "__main__":
-    print("repo_loader.py loaded successfully")
+    print("repo_search.py loaded successfully")
