@@ -6,8 +6,8 @@ from langchain_qdrant import QdrantVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client.models import Distance, VectorParams
 
-from qdrant_setup import client
-from embedding_model import embedding_model
+from src.qdrant_setup import client
+from src.embedding_model import embedding_model
 
 IGNORED_DIRECTORIES = {
     ".git",

@@ -5,7 +5,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 from langchain_qdrant import QdrantVectorStore
 
-from embedding_model import embedding_model
+from src.embedding_model import embedding_model
 
 
 load_dotenv()
