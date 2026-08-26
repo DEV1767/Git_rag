@@ -7,7 +7,6 @@ from src.repo_search import build_repo_store
 from src.mcp_setup import mcp_session
 from src.agent import build_graph
 
-
 app = FastAPI(
     title="GitHub Agentic RAG",
     version="1.0.0",
@@ -19,12 +18,15 @@ class ChatRequest(BaseModel):
     question: str
 
 
+@app.get('/ask')
+def ask():
+    return "Server is running "
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
 
-    owner, repo = parse_github_repo(
-        request.repository_url
-    )
+    owner, repo = parse_github_repo(request.repository_url)
 
     tool_store = build_tool_store()
 
@@ -52,8 +54,6 @@ async def chat(request: ChatRequest):
         return {
             "repository": f"{owner}/{repo}",
             "question": request.question,
-            "selected_tool": result.get(
-                "selected_tool"
-            ),
+            "selected_tool": result.get("selected_tool"),
             "answer": result["answer"],
         }
