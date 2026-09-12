@@ -87,11 +87,15 @@ Running
 
 Install dependencies:
 
-pip install -r requirements.txt
+pip install -r requirement.txt
 
 Run the API:
 
 uvicorn src.app:app --reload
+
+Open the UI:
+
+http://127.0.0.1:8000/
 
 API documentation:
 
