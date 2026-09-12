@@ -109,4 +109,3 @@ Streaming responses
 Conversation memory
 Advanced repository understanding
 
-**This is much better for GitHub:** short, readable, shows the architecture a
