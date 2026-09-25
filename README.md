@@ -89,6 +89,14 @@ Install dependencies:
 
 pip install -r requirement.txt
 
+Run the interactive agent:
+
+python -m src.agent
+
+The direct file form is also supported:
+
+python src\agent.py
+
 Run the API:
 
 uvicorn src.app:app --reload
@@ -108,4 +116,3 @@ Retrieval evaluation
 Streaming responses
 Conversation memory
 Advanced repository understanding
-

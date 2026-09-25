@@ -1,5 +1,11 @@
 import asyncio
+import sys
+from pathlib import Path
 from typing import TypedDict, Any
+
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langgraph.graph import StateGraph, START, END
 
@@ -11,7 +17,7 @@ from src.mcp_setup import (
 from src.repo_search import build_repo_store
 
 from src.retriver import (
-    retrieve_documents,
+    retrieve_hybrid_documents,
     build_context,
 )
 
@@ -87,13 +93,21 @@ async def execute_mcp_node(state: AgentState):
 
 
 async def retrieve_rag_node(state: AgentState):
+    collection_name = (
+        f"github_{state['owner']}_{state['repo']}"
+    ).replace("/", "_")
 
-    documents = retrieve_documents(
-        state["repo_store"],
-        state["question"],
+    documents = retrieve_hybrid_documents(
+        vectorstore=state["repo_store"],
+        query=state["question"],
+        collection_name=collection_name,
+        k=30,
     )
 
-    print(f"\nRetrieved {len(documents)} " "repository documents.")
+    print(
+        f"\nRetrieved {len(documents)} "
+        "unique hybrid documents."
+    )
 
     repo_context = build_context(documents)
 

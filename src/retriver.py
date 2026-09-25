@@ -1,23 +1,72 @@
+
+from src.repo_search import hybrid_search, rank_hybrid_results
 from langchain_core.documents import Document
 
 
-def retrieve_documents(vectorstore, query, k=5):
-    documents = vectorstore.similarity_search(query, k=k)
+def retrieve_hybrid_documents(
+    vectorstore,
+    query,
+    collection_name,
+    k=30,
+):
+    # Get candidates from Qdrant + BM25
+    results = hybrid_search(
+        query=query,
+        collection_name=collection_name,
+        vectorstore=vectorstore,
+        k=k,
+    )
 
-    print("\nRelevant repository files:")
+    # Hybrid ranking
+    # Rank the combined candidates and keep the top 8
+    results = rank_hybrid_results(
+        results,
+        top_k=15,
+    )
 
-    for doc in documents:
-        print("-", doc.metadata.get("path"))
+    print("\nFinal Hybrid Ranked Results:")
 
-    print(f"\nRepository chunks retrieved: {len(documents)}")
+    for result in results:
 
-    return documents
+        document = result["document"]
+
+        print(
+            "-",
+            document.metadata.get("path"),
+            "| chunk:",
+            document.metadata.get("chunk_id"),
+            "| qdrant:",
+            result.get("qdrant_score"),
+            "| bm25:",
+            result.get("bm25_score"),
+            "| hybrid:",
+            round(
+                result.get("hybrid_score", 0.0),
+                4,
+            ),
+            "| sources:",
+            result.get("sources"),
+        )
+
+    print(
+        f"\nFinal hybrid chunks: {len(results)}"
+    )
+
+    return results
 
 
-def build_context(documents):
+def build_context(results):
+
     context = []
 
-    for doc in documents:
-        context.append(f"FILE: {doc.metadata.get('path')}\n" f"{doc.page_content}")
+    for result in results:
+
+        document = result["document"]
+
+        context.append(
+            f"FILE: {document.metadata.get('path')}\n"
+            f"{document.page_content}"
+        )
 
     return "\n\n".join(context)
+
