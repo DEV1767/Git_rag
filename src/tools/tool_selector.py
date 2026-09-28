@@ -1,6 +1,7 @@
-from src.prompt_helper import tool_selection_prompt
 from langchain_core.documents import Document
-from src.llm import Groq_model
+
+from src.logger import logger
+from src.tools.jev import JEVToolSelector
 
 
 async def discover_mcp_tools(session):
@@ -14,13 +15,11 @@ async def discover_mcp_tools(session):
     documents = []
 
     for tool in result.tools:
-        tool_name = tool.name
-        description = tool.description or ""
 
         document = Document(
-            page_content=description,
+            page_content=tool.description or "",
             metadata={
-                "name": tool_name,
+                "name": tool.name,
                 "source": "github_mcp",
                 "input_schema": str(tool.inputSchema),
             },
@@ -28,25 +27,113 @@ async def discover_mcp_tools(session):
 
         documents.append(document)
 
+    logger.info(
+        "Discovered %d MCP tools",
+        len(documents),
+    )
+
     return documents
 
 
 async def add_mcp_to_store(session, tool_store):
     """
-    Discover MCP tools and add them to the Qdrant Tool Store.
+    Discover MCP tools and add them to the Tool Store.
     """
 
     documents = await discover_mcp_tools(session)
 
     if not documents:
-        print("No MCP tools found.")
+        logger.warning(
+            "No MCP tools found."
+        )
         return []
 
     tool_store.add_documents(documents)
 
-    print(f"Added {len(documents)} MCP tools " "to Tool Store.")
+    logger.info(
+        "Added %d MCP tools to Tool Store.",
+        len(documents),
+    )
 
     return documents
+
+
+def deduplicate_tools(results):
+    """
+    Remove duplicate tools returned by Qdrant.
+
+    Keep one document for each unique MCP tool.
+    """
+
+    unique_tools = {}
+
+    for document, score in results:
+
+        tool_name = document.metadata.get(
+            "name"
+        )
+
+        if not tool_name:
+            continue
+
+        if tool_name not in unique_tools:
+
+            unique_tools[tool_name] = {
+                "document": document,
+                "qdrant_score": float(score),
+            }
+
+    return list(
+        unique_tools.values()
+    )
+
+
+async def rank_tools(query, results):
+    """
+    Rank retrieved MCP tools using JEV.
+    """
+
+    tools = deduplicate_tools(results)
+
+    logger.info(
+        "Unique Tool Store candidates: %d",
+        len(tools),
+    )
+
+    if not tools:
+        return []
+
+    logger.info(
+        "========== TOOL CANDIDATES =========="
+    )
+
+    for tool in tools:
+
+        document = tool["document"]
+
+        logger.info(
+            "Candidate: %s | Qdrant=%.4f",
+            document.metadata.get("name"),
+            tool["qdrant_score"],
+        )
+
+    logger.info(
+        "====================================="
+    )
+
+    # -----------------------------------------
+    # JEV
+    # -----------------------------------------
+
+    selector = JEVToolSelector()
+
+    ranked_tools = selector.rerank(
+        query=query,
+        tools=tools,
+        top_k=1,
+    )
+
+    return ranked_tools
 
 
 async def select_tool(
@@ -59,122 +146,169 @@ async def select_tool(
 
     Flow:
 
-    1. Search the existing Qdrant Tool Store.
-    2. Ask Groq to select the relevant tool.
-    3. If no relevant tool exists:
-       - Discover tools from MCP.
-       - Add them to Qdrant.
-       - Search Qdrant again.
-       - Ask Groq to select again.
-
-    MCP discovery is completely handled inside
-    this module.
+    1. Search Tool Store broadly.
+    2. Remove duplicate tools.
+    3. Rank candidates using JEV.
+    4. If no candidates exist, discover MCP tools.
+    5. Add discovered tools to Tool Store.
+    6. Search again.
+    7. Rank again using JEV.
+    8. Return selected tool.
     """
+
+    # ==========================================
+    # 1. Broad Tool Store search
+    # ==========================================
 
     results = tool_store.similarity_search_with_score(
         query,
-        k=5,
+        k=30,
     )
 
-    print("\nTool Store candidates:")
-
-    if results:
-        for document, score in results:
-            print(f"{document.metadata.get('name')} " f"(score={score})")
-    else:
-        print("No candidates found.")
-
-    tools = "\n\n".join(
-        f"Tool: {document.metadata.get('name')}\n"
-        f"Description: {document.page_content}"
-        for document, score in results
+    logger.info(
+        "Tool Store returned %d candidates",
+        len(results),
     )
 
-    prompt = tool_selection_prompt.invoke(
-        {
-            "question": query,
-            "tools": tools,
-        }
+    # ==========================================
+    # 2. JEV ranking
+    # ==========================================
+
+    ranked_tools = await rank_tools(
+        query,
+        results,
     )
 
-    response = await Groq_model.ainvoke(prompt)
+    # ==========================================
+    # 3. JEV selected a tool
+    # ==========================================
 
-    content = response.content
+    if ranked_tools:
 
-    if isinstance(content, list):
-        content = "".join(str(x) for x in content)
+        best_tool = ranked_tools[0]
 
-    content = str(content).strip()
+        tool_name = (
+            best_tool["document"]
+            .metadata
+            .get("name")
+        )
 
-    if "NO_RELEVANT_TOOL" not in content:
+        score = best_tool.get(
+            "jev_score",
+            0.0,
+        )
 
-        print(f"\nSelected tool from Tool Store: " f"{content}")
+        logger.info(
+            "JEV selected tool: %s | score=%.4f",
+            tool_name,
+            score,
+        )
 
         return {
-            "source": "tool_store",
-            "selection": content,
-            "tools": results,
+            "source": "jev",
+            "selection": tool_name,
+            "tools": ranked_tools,
+            "score": score,
         }
 
-    print("\nNo relevant tool found in Tool Store.")
+    # ==========================================
+    # 4. No candidates
+    # ==========================================
 
-    print("Discovering tools from GitHub MCP...")
+    logger.info(
+        "No useful Tool Store candidates."
+    )
+
+    logger.info(
+        "Discovering tools from GitHub MCP..."
+    )
 
     mcp_documents = await add_mcp_to_store(
         session,
         tool_store,
     )
 
+    # ==========================================
+    # 5. No MCP tools
+    # ==========================================
+
     if not mcp_documents:
-        print("No MCP tools available.")
+
+        logger.warning(
+            "No MCP tools available."
+        )
 
         return {
             "source": "mcp",
-            "selection": "No MCP tools available.",
+            "selection": "NO_RELEVANT_TOOL",
             "tools": [],
         }
 
+    # ==========================================
+    # 6. Search Tool Store again
+    # ==========================================
+
     results = tool_store.similarity_search_with_score(
         query,
-        k=5,
+        k=30,
     )
 
-    print("\nTool Store candidates after " "MCP discovery:")
-
-    if results:
-        for document, score in results:
-            print(f"{document.metadata.get('name')} " f"(score={score})")
-    else:
-        print("No candidates found after discovery.")
-
-    tools = "\n\n".join(
-        f"Tool: {document.metadata.get('name')}\n"
-        f"Description: {document.page_content}"
-        for document, score in results
+    logger.info(
+        "Candidates after MCP discovery: %d",
+        len(results),
     )
 
-    prompt = tool_selection_prompt.invoke(
-        {
-            "question": query,
-            "tools": tools,
+    # ==========================================
+    # 7. JEV ranking again
+    # ==========================================
+
+    ranked_tools = await rank_tools(
+        query,
+        results,
+    )
+
+    # ==========================================
+    # 8. Still nothing useful
+    # ==========================================
+
+    if not ranked_tools:
+
+        logger.warning(
+            "JEV could not select a relevant tool."
+        )
+
+        return {
+            "source": "mcp_discovery",
+            "selection": "NO_RELEVANT_TOOL",
+            "tools": [],
         }
+
+    # ==========================================
+    # 9. Final selected tool
+    # ==========================================
+
+    best_tool = ranked_tools[0]
+
+    tool_name = (
+        best_tool["document"]
+        .metadata
+        .get("name")
     )
 
-    response = await Groq_model.ainvoke(prompt)
+    score = best_tool.get(
+        "jev_score",
+        0.0,
+    )
 
-    content = response.content
-
-    if isinstance(content, list):
-        content = "".join(str(x) for x in content)
-
-    content = str(content).strip()
-
-    print(f"\nSelected tool after MCP discovery: " f"{content}")
+    logger.info(
+        "JEV selected after discovery: %s | score=%.4f",
+        tool_name,
+        score,
+    )
 
     return {
         "source": "mcp_discovery",
-        "selection": content,
-        "tools": results,
+        "selection": tool_name,
+        "tools": ranked_tools,
+        "score": score,
     }
-
-

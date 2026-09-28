@@ -6,6 +6,7 @@ from qdrant_client.models import Distance, VectorParams
 from langchain_qdrant import QdrantVectorStore
 
 from src.embedding_model import embedding_model
+from src.logger import logger
 
 
 load_dotenv()
@@ -40,17 +41,11 @@ def build_tool_store():
             ),
         )
 
-        print(
-            f"Created Qdrant collection: "
-            f"{collection_name}"
-        )
+        logger.info("Created Qdrant collection: %s", collection_name)
 
     else:
 
-        print(
-            f"Using existing Qdrant collection: "
-            f"{collection_name}"
-        )
+        logger.info("Using existing Qdrant collection: %s", collection_name)
 
     
     tool_store = QdrantVectorStore(
@@ -62,4 +57,4 @@ def build_tool_store():
     return tool_store
 
 
-print("DB connected")
+logger.info("Qdrant database client initialized")
