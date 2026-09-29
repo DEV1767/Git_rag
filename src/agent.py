@@ -1,7 +1,8 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
-from typing import TypedDict, Any
+from typing import TypedDict, Any, Dict, List
 
 
 if __package__ in {None, ""}:
@@ -71,12 +72,15 @@ class AgentState(TypedDict, total=False):
     # MCP
     session: Any
     selected_tool: str
+    tool_schema: str
+    tool_arguments: Dict[str, Any]
     mcp_result: Any
 
-    # Context
+    # Context & Sources
     repo_context: str
     mcp_context: str
     context: str
+    sources: List[str]
 
     # Final answer
     answer: str
@@ -196,21 +200,99 @@ async def select_tool_node(
         state["tool_store"],
     )
 
-    selected_tool = tool["selection"]
+    selected_tool = tool.get("selection", "NO_RELEVANT_TOOL")
+    tool_schema = tool.get("schema", "{}")
+    tool_score = tool.get("score", 0.0)
+
+    # Discard if below minimal confidence or explicitly irrelevant
+    if not selected_tool or selected_tool == "NO_RELEVANT_TOOL":
+        logger.info("No relevant MCP tool selected.")
+        return {
+            "selected_tool": "NO_RELEVANT_TOOL",
+            "tool_schema": "{}",
+        }
 
     logger.info(
-        "Selected MCP tool: %s",
+        "Selected MCP tool: %s | JEV score=%.4f",
         selected_tool,
+        tool_score,
     )
 
     return {
-        "selected_tool": selected_tool
+        "selected_tool": selected_tool,
+        "tool_schema": tool_schema,
     }
 
 
 # =========================================================
 # 5. EXECUTE MCP TOOL
 # =========================================================
+
+def format_mcp_result(mcp_result) -> str:
+    """Extract clean, readable text from MCP CallToolResult."""
+    if not mcp_result:
+        return "No MCP information was returned."
+
+    if hasattr(mcp_result, "content") and isinstance(mcp_result.content, list):
+        text_parts = []
+        for item in mcp_result.content:
+            if hasattr(item, "text") and item.text:
+                text_parts.append(item.text)
+        if text_parts:
+            return "\n\n".join(text_parts)
+
+    return str(mcp_result)
+
+
+async def prepare_tool_arguments(
+    question: str,
+    tool_name: str,
+    tool_schema: str,
+    owner: str,
+    repo: str,
+) -> Dict[str, Any]:
+    """
+    Use LLM to extract dynamic tool parameters from user question
+    guided by the tool's JSON input schema.
+    """
+    prompt = f"""You are a GitHub MCP tool argument generator.
+The user wants to execute the GitHub tool: '{tool_name}'.
+
+Tool Input Schema:
+{tool_schema}
+
+Repository Identity:
+owner: {owner}
+repo: {repo}
+
+User Query/Request:
+{question}
+
+Instructions:
+1. Extract or infer the parameters required by '{tool_name}' from the user request.
+2. Always ensure 'owner' is set to '{owner}' and 'repo' is set to '{repo}' if applicable.
+3. If an issue number, pull request number, branch name, or query string is mentioned, map it to the corresponding schema property.
+4. Output ONLY a valid JSON object of arguments. Do not include markdown code fences (```), explanations, or extra commentary.
+
+Example:
+{{"owner": "{owner}", "repo": "{repo}"}}
+"""
+    try:
+        response = await Groq_model.ainvoke(prompt)
+        text = response.content
+        if isinstance(text, list):
+            text = "".join(str(x) for x in text)
+        clean_text = text.strip().replace("```json", "").replace("```", "").strip()
+        args = json.loads(clean_text)
+        if isinstance(args, dict):
+            args.setdefault("owner", owner)
+            args.setdefault("repo", repo)
+            return args
+    except Exception as e:
+        logger.warning("Could not parse LLM tool arguments, using owner/repo fallback: %s", e)
+
+    return {"owner": owner, "repo": repo}
+
 
 async def execute_mcp_node(
     state: AgentState
@@ -220,14 +302,10 @@ async def execute_mcp_node(
         "selected_tool"
     )
 
-    # If no useful tool was found,
-    # don't execute anything.
     if not selected_tool or selected_tool == "NO_RELEVANT_TOOL":
-
         logger.warning(
-            "No valid MCP tool selected."
+            "No valid MCP tool selected. Skipping MCP execution."
         )
-
         return {
             "mcp_result": None,
             "mcp_context": (
@@ -235,31 +313,73 @@ async def execute_mcp_node(
             )
         }
 
-    arguments = {
-        "owner": state["owner"],
-        "repo": state["repo"],
-    }
-
-    logger.info(
-        "Executing MCP tool: %s",
-        selected_tool,
+    tool_schema = state.get("tool_schema", "{}")
+    arguments = await prepare_tool_arguments(
+        question=state["question"],
+        tool_name=selected_tool,
+        tool_schema=tool_schema,
+        owner=state["owner"],
+        repo=state["repo"],
     )
 
-    mcp_result = await execute_mcp_tool(
-        state["session"],
+    logger.info(
+        "Executing MCP tool: %s with arguments: %s",
         selected_tool,
         arguments,
     )
 
+    try:
+        mcp_result = await execute_mcp_tool(
+            state["session"],
+            selected_tool,
+            arguments,
+        )
+    except Exception as error:
+        logger.error(
+            "Error executing MCP tool %s: %s",
+            selected_tool,
+            error,
+        )
+        mcp_result = f"Error executing tool {selected_tool}: {error}"
+
+    formatted_context = format_mcp_result(mcp_result)
+
     logger.info(
-        "MCP result: %s",
-        mcp_result,
+        "MCP execution complete. Output preview: %s",
+        formatted_context[:250],
     )
 
     return {
+        "tool_arguments": arguments,
         "mcp_result": mcp_result,
-        "mcp_context": str(mcp_result),
+        "mcp_context": formatted_context,
     }
+
+
+def route_after_mcp(state: AgentState):
+    """
+    Decide whether to also retrieve repository code after MCP tool execution.
+    - If no MCP tool was executed, fallback to RAG.
+    - If the user query is purely an MCP task (issues, PRs, branches, releases) and has no code intent,
+      route directly to generate_answer.
+    - If the user query asks about code files, functions, or implementation, also retrieve code RAG.
+    """
+    selected_tool = state.get("selected_tool")
+    if not selected_tool or selected_tool == "NO_RELEVANT_TOOL":
+        return "retrieve_rag"
+
+    question = state.get("question", "").lower()
+    code_intent_words = [
+        "code", "file", "function", "implement", "class", "method",
+        "where", "route", "controller", "how", "middleware", "logic"
+    ]
+
+    if any(word in question for word in code_intent_words):
+        logger.info("Hybrid query detected: routing to repository RAG for code context.")
+        return "retrieve_rag"
+
+    logger.info("Pure MCP query detected: routing directly to answer generation.")
+    return "generate_answer"
 
 
 # =========================================================
@@ -294,6 +414,17 @@ async def retrieve_rag_node(
         documents
     )
 
+    # Extract unique source paths
+    sources = []
+    seen = set()
+    for doc_item in documents:
+        doc = doc_item.get("document")
+        if doc and hasattr(doc, "metadata"):
+            p = doc.metadata.get("path")
+            if p and p not in seen:
+                seen.add(p)
+                sources.append(p)
+
     # Keep existing MCP context if MCP
     # was executed.
     mcp_context = state.get(
@@ -304,6 +435,7 @@ async def retrieve_rag_node(
     return {
         "repo_context": repo_context,
         "mcp_context": mcp_context,
+        "sources": sources,
     }
 
 
@@ -450,19 +582,21 @@ def build_graph():
     )
 
     # -----------------------------------------------------
-    # MCP → RAG
+    # MCP → RAG or FINAL LLM (Dynamic Routing)
     #
-    # This allows the final answer to use both:
-    #
-    # MCP context
-    # +
-    # Repository RAG context
-    #
+    # If the user query is a pure MCP task (e.g. list issues, list PRs),
+    # route directly to generate_answer.
+    # If it is a hybrid query (mentions code/implementation) or no tool
+    # was selected, retrieve repository code context.
     # -----------------------------------------------------
 
-    graph.add_edge(
+    graph.add_conditional_edges(
         "execute_mcp",
-        "retrieve_rag",
+        route_after_mcp,
+        {
+            "retrieve_rag": "retrieve_rag",
+            "generate_answer": "generate_answer",
+        },
     )
 
     # -----------------------------------------------------

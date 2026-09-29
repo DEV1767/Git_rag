@@ -87,6 +87,7 @@ async def chat(request: ChatRequest):
                 "repository": f"{owner}/{repo}",
                 "question": request.question,
                 "selected_tool": result.get("selected_tool"),
+                "sources": result.get("sources", []),
                 "answer": result["answer"],
             }
     except ExceptionGroup as error:

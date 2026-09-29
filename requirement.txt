@@ -17,3 +17,9 @@ python-dotenv
 
 pydantic
 typing-extensions
+rank-bm25
+sentence-transformers
+scikit-learn
+requests
+langchain-openai
+numpy

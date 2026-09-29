@@ -1,6 +1,9 @@
 
 import json
+import math
 import os
+import pickle
+from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
@@ -21,8 +24,66 @@ reranker = CrossEncoder(
 )
 
 
+def sigmoid(x: float) -> float:
+    """Safely apply sigmoid to scale raw logits into (0, 1)."""
+    try:
+        if x >= 0:
+            return 1.0 / (1.0 + math.exp(-x))
+        else:
+            z = math.exp(x)
+            return z / (1.0 + z)
+    except OverflowError:
+        return 1.0 if x > 0 else 0.0
+
+
 bm25_indexes = {}
 bm25_documents = {}
+
+BM25_CACHE_DIR = (
+    Path(__file__).resolve().parent.parent
+    / "logs"
+    / "bm25_cache"
+)
+
+
+def save_bm25_index(chunks, collection_name: str) -> None:
+    """Save the BM25 index and document chunks to disk cache."""
+    try:
+        BM25_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file = BM25_CACHE_DIR / f"{collection_name}.pkl"
+        bm25 = bm25_indexes.get(collection_name)
+        if bm25 is not None:
+            with open(cache_file, "wb") as f:
+                pickle.dump(
+                    {
+                        "bm25": bm25,
+                        "chunks": chunks,
+                    },
+                    f,
+                )
+            logger.info("Saved BM25 index to disk cache: %s", cache_file)
+    except Exception as e:
+        logger.warning("Failed to save BM25 index to disk: %s", e)
+
+
+def load_bm25_index(collection_name: str) -> bool:
+    """Load the BM25 index and document chunks from disk cache if present."""
+    if collection_name in bm25_indexes:
+        return True
+
+    cache_file = BM25_CACHE_DIR / f"{collection_name}.pkl"
+    if cache_file.exists():
+        try:
+            with open(cache_file, "rb") as f:
+                data = pickle.load(f)
+                bm25_indexes[collection_name] = data["bm25"]
+                bm25_documents[collection_name] = data["chunks"]
+            logger.info("Loaded BM25 index from disk cache for: %s", collection_name)
+            return True
+        except Exception as e:
+            logger.warning("Failed to load BM25 index from disk: %s", e)
+            return False
+    return False
 
 
 # ============================================================
@@ -434,11 +495,18 @@ def split_documents(documents):
             [document]
         )
 
+        path = document.metadata.get("path", "unknown")
+
         for index, chunk in enumerate(chunks):
 
-            chunk.metadata["chunk_id"] = (
-                f"{chunk.metadata.get('path', 'unknown')}_{index}"
-            )
+            chunk_id = f"{path}_{index}"
+            chunk.metadata["chunk_id"] = chunk_id
+
+            # Contextual prefix so that embeddings, BM25, and Cross-Encoder
+            # have full visibility into the file path and module name
+            header = f"File: {path}\nLanguage: {language}\n\n"
+            if not chunk.page_content.startswith("File: "):
+                chunk.page_content = f"{header}{chunk.page_content}"
 
         all_chunks.extend(chunks)
 
@@ -480,6 +548,8 @@ def create_bm25_index(
     logger.info("BM25 index created for: %s", collection_name)
     logger.info("BM25 documents: %d", len(chunks))
 
+    save_bm25_index(chunks, collection_name)
+
     return bm25
 
 
@@ -499,9 +569,11 @@ def bm25_search(
 
     if collection_name not in bm25_indexes:
 
-        raise ValueError(
-            f"BM25 index not found for {collection_name}"
-        )
+        # Attempt to load from disk cache first
+        if not load_bm25_index(collection_name):
+            raise ValueError(
+                f"BM25 index not found for {collection_name}"
+            )
 
     bm25 = bm25_indexes[collection_name]
 
@@ -765,12 +837,16 @@ def rank_hybrid_results(results, query, top_k=15):
     # 5. Get reranker scores
     reranker_scores = reranker.predict(pairs)
 
-    # 6. Store reranker scores
+    # 6. Store reranker scores safely
     for result, score in zip(
         results,
         reranker_scores
     ):
-        result["reranker_score"] = float(score)
+        raw_score = float(score)
+        # BGE CrossEncoder can return unbounded logits depending on version
+        if raw_score < -1.0 or raw_score > 1.0:
+            raw_score = sigmoid(raw_score)
+        result["reranker_score"] = raw_score
 
     # 7. Final ranking using Cross-Encoder
     results.sort(
@@ -781,7 +857,7 @@ def rank_hybrid_results(results, query, top_k=15):
     for result in results[:top_k]:
         metadata = result["document"].metadata
         logger.info(
-            "Reranked | file=%s | chunk=%s | score=%.4f",
+            "Reranked | file=%s | chunk=%s | score=%.6f",
             metadata.get("path", "unknown"),
             metadata.get("chunk_id", "unknown"),
             result["reranker_score"],
@@ -876,12 +952,31 @@ async def build_repo_store(
     session,
     owner,
     repo,
- ):
+    force_refresh=False,
+):
 
     collection_name = (
         f"github_{owner}_{repo}"
         .replace("/", "_")
     )
+
+    # Check if both Qdrant collection and BM25 index are already cached
+    if not force_refresh:
+        collection_exists = client.collection_exists(collection_name)
+        bm25_cached = load_bm25_index(collection_name)
+
+        if collection_exists and bm25_cached:
+            logger.info(
+                "Reusing existing Qdrant collection and cached BM25 index for: %s (skipping GitHub crawl)",
+                collection_name,
+            )
+            return QdrantVectorStore(
+                client=client,
+                collection_name=collection_name,
+                embedding=embedding_model,
+            )
+
+    logger.info("Ingesting repository from GitHub: %s/%s", owner, repo)
 
     documents = await fetch_repository(
         session,
@@ -913,9 +1008,24 @@ async def build_repo_store(
     return vectorstore
 
 
-def filter_relevant_evidence(results, top_k=5, relative_threshold=0.2):
+def filter_relevant_evidence(
+    results,
+    top_k=5,
+    min_k=3,
+    relative_threshold=0.2,
+):
+    """
+    Filter evidence chunks adaptively while ensuring that:
+    1. A minimum floor of evidence chunks (min_k) is preserved.
+    2. Real source code files are not starved out by README/documentation.
+    3. Low-scoring noise is pruned.
+    """
     if not results:
         return []
+
+    # If results are already fewer than or equal to min_k, keep all of them up to top_k
+    if len(results) <= min_k:
+        return results[:top_k]
 
     scores = [
         float(result.get("reranker_score", 0.0))
@@ -924,16 +1034,35 @@ def filter_relevant_evidence(results, top_k=5, relative_threshold=0.2):
 
     max_score = max(scores)
 
-    if max_score <= 0:
-        return results[:top_k]
+    # Dynamic cutoff
+    if max_score > 0:
+        cutoff = max_score * relative_threshold
+        filtered_results = [
+            result
+            for result in results
+            if float(result.get("reranker_score", 0.0)) >= cutoff
+        ]
+    else:
+        filtered_results = list(results)
 
-    cutoff = max_score * relative_threshold
+    # Safety floor: ensure at least min_k items are kept
+    if len(filtered_results) < min_k:
+        filtered_results = results[:min_k]
 
-    filtered_results = [
-        result
-        for result in results
-        if float(result.get("reranker_score", 0.0)) >= cutoff
-    ]
+    # Code-preservation heuristic:
+    # If the filtered results only contain documentation (e.g. .md, .txt),
+    # but top reranked results contain source code (.js, .py, .ts, etc.),
+    # include the best code chunk(s) so the LLM has actual implementation evidence!
+    has_code = any(
+        res["document"].metadata.get("extension", "") not in {".md", ".txt", ""}
+        for res in filtered_results
+    )
+    if not has_code:
+        for res in results:
+            ext = res["document"].metadata.get("extension", "")
+            if ext not in {".md", ".txt", ""} and res not in filtered_results:
+                filtered_results.append(res)
+                break
 
     return filtered_results[:top_k]
 

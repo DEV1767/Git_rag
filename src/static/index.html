@@ -7,6 +7,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <style>
     :root {
       color-scheme: dark;
@@ -235,11 +238,136 @@
       border-bottom: 1px solid var(--border);
     }
 
+    #answer .sources-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 16px;
+      background: #0d1219;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+    }
+
+    .sources-label {
+      color: var(--accent);
+      font-weight: 600;
+      margin-right: 4px;
+    }
+
+    .source-pill {
+      background: rgba(63, 185, 80, 0.12);
+      border: 1px solid rgba(63, 185, 80, 0.3);
+      color: var(--text);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
     #answer .answer-body {
-      padding: 16px;
-      white-space: pre-wrap;
+      padding: 20px;
       line-height: 1.65;
       font-size: 0.95rem;
+    }
+
+    #answer .answer-body h1,
+    #answer .answer-body h2,
+    #answer .answer-body h3 {
+      color: #fff;
+      margin-top: 1.2em;
+      margin-bottom: 0.5em;
+      font-weight: 600;
+    }
+
+    #answer .answer-body p {
+      margin: 0.7em 0;
+    }
+
+    #answer .answer-body ul,
+    #answer .answer-body ol {
+      padding-left: 24px;
+      margin: 0.7em 0;
+    }
+
+    #answer .answer-body li {
+      margin: 4px 0;
+    }
+
+    #answer .answer-body table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1em 0;
+      font-size: 0.9rem;
+    }
+
+    #answer .answer-body th,
+    #answer .answer-body td {
+      border: 1px solid var(--border-strong);
+      padding: 8px 12px;
+      text-align: left;
+    }
+
+    #answer .answer-body th {
+      background: #161b22;
+      color: var(--text);
+    }
+
+    #answer .answer-body code:not(pre code) {
+      font-family: var(--font-mono);
+      font-size: 0.85em;
+      background: #161b22;
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #7ee787;
+    }
+
+    #answer .answer-body pre {
+      position: relative;
+      background: #0d1117;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 14px;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+
+    #answer .answer-body pre code {
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+      line-height: 1.5;
+      background: transparent;
+      padding: 0;
+      border: 0;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 4px 8px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.2s ease, background 0.15s ease;
+    }
+
+    #answer .answer-body pre:hover .copy-btn {
+      opacity: 1;
+    }
+
+    .copy-btn:hover {
+      background: rgba(255, 255, 255, 0.16);
+      color: var(--text);
     }
 
     @media (max-width: 480px) {
@@ -277,6 +405,7 @@
         <div class="workspace">
           <section id="answer" aria-live="polite">
             <div class="answer-head">output</div>
+            <div id="sources-container" class="sources-bar" style="display: none;"></div>
             <div class="answer-body"></div>
           </section>
           <div class="query-panel">
@@ -360,7 +489,46 @@
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "The request failed.");
-        answerBody.textContent = data.answer || "No answer was returned.";
+
+        // Render sources
+        const sourcesContainer = document.querySelector("#sources-container");
+        sourcesContainer.innerHTML = "";
+        if (data.sources && data.sources.length > 0) {
+          const label = document.createElement("span");
+          label.className = "sources-label";
+          label.textContent = "Evidence:";
+          sourcesContainer.appendChild(label);
+
+          data.sources.forEach(src => {
+            const pill = document.createElement("span");
+            pill.className = "source-pill";
+            pill.textContent = src;
+            sourcesContainer.appendChild(pill);
+          });
+          sourcesContainer.style.display = "flex";
+        } else {
+          sourcesContainer.style.display = "none";
+        }
+
+        // Render Markdown answer
+        answerBody.innerHTML = marked.parse(data.answer || "No answer was returned.");
+
+        // Add copy buttons to code blocks
+        answerBody.querySelectorAll("pre").forEach(pre => {
+          const copyBtn = document.createElement("button");
+          copyBtn.type = "button";
+          copyBtn.className = "copy-btn";
+          copyBtn.textContent = "Copy";
+          copyBtn.addEventListener("click", () => {
+            const code = pre.querySelector("code") ? pre.querySelector("code").innerText : pre.innerText;
+            navigator.clipboard.writeText(code).then(() => {
+              copyBtn.textContent = "Copied!";
+              setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+            });
+          });
+          pre.appendChild(copyBtn);
+        });
+
         answer.style.display = "block";
         setStatus(data.selected_tool ? `Used GitHub tool: ${data.selected_tool}` : "Answer ready.");
       } catch (error) {

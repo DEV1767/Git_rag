@@ -209,6 +209,8 @@ async def select_tool(
             "selection": tool_name,
             "tools": ranked_tools,
             "score": score,
+            "schema": best_tool["document"].metadata.get("input_schema", "{}"),
+            "description": best_tool["document"].page_content or "",
         }
 
     # ==========================================
@@ -311,4 +313,6 @@ async def select_tool(
         "selection": tool_name,
         "tools": ranked_tools,
         "score": score,
+        "schema": best_tool["document"].metadata.get("input_schema", "{}"),
+        "description": best_tool["document"].page_content or "",
     }
