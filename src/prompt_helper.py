@@ -1,9 +1,3 @@
-from langchain_core.prompts import (
-    PromptTemplate,
-    ChatPromptTemplate,
-)
-from langchain_core.prompts import PromptTemplate
-
 
 from langchain_core.prompts import PromptTemplate
 
@@ -31,9 +25,6 @@ Answer:
 """)
 
 
-
-
-from langchain_core.prompts import PromptTemplate
 
 retriever_prompt = PromptTemplate.from_template(
     """
