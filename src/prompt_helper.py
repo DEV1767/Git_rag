@@ -28,7 +28,7 @@ Answer:
 
 retriever_prompt = PromptTemplate.from_template(
     """
-You are a repository code analysis assistant.
+ You are a repository code analysis assistant.
 
 Answer the user's question using ONLY the repository evidence
 provided in the context below.
